@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 
@@ -16,19 +15,18 @@ import (
 const maxIterations = 20
 
 func main() {
-	apiKey := os.Getenv("OPENAI_API_KEY")
+	apiKey := os.Getenv("LLM_TOKEN")
 	if apiKey == "" {
-		panic("OPENAI_API_KEY environment variable is not set")
+		panic("LLM_TOKEN environment variable is not set")
+	}
+	baseURL := os.Getenv("LLM_END_PROT")
+	if baseURL == "" {
+		panic("LLM_END_PROT environment variable is not set")
 	}
 
 	client := openai.NewClient(
 		option.WithAPIKey(apiKey),
-		option.WithBaseURL("https://new.xkool.cfd/v1"),
-		option.WithMiddleware(func(r *http.Request, next option.MiddlewareNext) (*http.Response, error) {
-			// new.xkool.cfd 网关屏蔽 openai 官方 SDK 的 User-Agent，伪装成 curl
-			r.Header.Set("User-Agent", "curl/8.5.0")
-			return next(r)
-		}),
+		option.WithBaseURL(baseURL),
 	)
 
 	tool := bashTool()
@@ -36,7 +34,7 @@ func main() {
 	err := agentLoop(
 		context.Background(),
 		&client,
-		"deepseek-v4-flash-0731",
+		"claude-sonnet-4-6",
 		"请评价我写的 AgentLoop 代码并提出改进建议，你可以直接修改代码。",
 		[]openai.ChatCompletionToolParam{tool},
 	)
