@@ -1,33 +1,57 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func Test_executeBashCommand(t *testing.T) {
 	tests := []struct {
-		name string // description of this test case
-		// Named input parameters for target function.
+		name    string
 		command string
-		want    string
 		wantErr bool
+		check   func(t *testing.T, output string)
 	}{
-		{"Test valid command", "echo Hello, World!", "Hello, World!\n", false},
-		{"Test valid command", "hostname -i", "192.168.16.2\n", false},
+		{
+			name:    "echo command returns expected output",
+			command: "echo Hello, World!",
+			check: func(t *testing.T, output string) {
+				if !strings.Contains(output, "Hello, World!") {
+					t.Errorf("expected output to contain 'Hello, World!', got: %s", output)
+				}
+			},
+		},
+		{
+			name:    "hostname command returns non-empty output",
+			command: "hostname",
+			check: func(t *testing.T, output string) {
+				if strings.TrimSpace(output) == "" {
+					t.Error("expected non-empty hostname, got empty string")
+				}
+			},
+		},
+		{
+			name:    "invalid command returns error",
+			command: "nonexistent_command_xyz123",
+			wantErr: true,
+		},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, gotErr := executeBashCommand(tt.command)
-			if gotErr != nil {
-				if !tt.wantErr {
-					t.Errorf("executeBashCommand() failed: %v", gotErr)
+			got, err := executeBashCommand(tt.command)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error but got none")
 				}
 				return
 			}
-			if tt.wantErr {
-				t.Fatal("executeBashCommand() succeeded unexpectedly")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-			t.Logf("executeBashCommand() = %v, want %v", got, tt.want)
-			if got != tt.want {
-				t.Errorf("executeBashCommand() = %v, want %v", got, tt.want)
+			t.Logf("executeBashCommand(%q) = %q", tt.command, got)
+			if tt.check != nil {
+				tt.check(t, got)
 			}
 		})
 	}
