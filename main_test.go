@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -39,7 +40,7 @@ func Test_executeBashCommand(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := executeBashCommand(tt.command)
+			got, err := executeBashCommand(context.Background(), tt.command)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error but got none")

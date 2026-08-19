@@ -1,11 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"os/signal"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -15,13 +20,19 @@ import (
 const maxIterations = 20
 
 func main() {
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	apiKey := os.Getenv("LLM_TOKEN")
 	if apiKey == "" {
-		panic("LLM_TOKEN environment variable is not set")
+		fmt.Println("can't find LLM_TOKEN env variable,exit")
+		os.Exit(1)
 	}
 	baseURL := os.Getenv("LLM_END_PROT")
 	if baseURL == "" {
-		panic("LLM_END_PROT environment variable is not set")
+		fmt.Println("can't find LLM_END_PROT env variable,exit")
+		os.Exit(1)
 	}
 
 	client := openai.NewClient(
@@ -31,16 +42,38 @@ func main() {
 
 	tool := bashTool()
 
-	err := agentLoop(
-		context.Background(),
-		&client,
-		"claude-sonnet-4-6",
-		"请评价我写的 AgentLoop 代码并提出改进建议，你可以直接修改代码。",
-		[]openai.ChatCompletionToolParam{tool},
-	)
-	if err != nil {
-		panic(err)
+	for {
+		fmt.Print(">")
+		reader := bufio.NewReader(os.Stdin)
+		text, err := reader.ReadString('\n')
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			panic(err)
+		}
+		prompt := strings.TrimSpace(text)
+		if prompt == "exit" {
+			fmt.Print("Bye~Bye~\n")
+			return
+		}
+
+		err = agentLoop(
+			ctx,
+			&client,
+			"claude-sonnet-4-6",
+			prompt,
+			[]openai.ChatCompletionToolParam{tool},
+		)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				fmt.Print("\ninterrupted")
+				os.Exit(130)
+			}
+			panic(err)
+		}
 	}
+
 }
 
 // agentLoop 运行一个 Chat Completions 风格的 Agent 循环。
@@ -60,7 +93,6 @@ func agentLoop(
 
 	for i := range maxIterations {
 		fmt.Printf("=== iteration %d ===\n", i+1)
-
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:    shared.ChatModel(model),
 			Messages: messages,
@@ -78,54 +110,65 @@ func agentLoop(
 			fmt.Printf("assistant: %s\n", msg.Content)
 		}
 
-		switch choice.FinishReason {
-		case "stop", "length":
-			// 模型已给出最终回复，正常结束
-			return nil
+		if choice.FinishReason == "length" && len(msg.ToolCalls) != 0 {
+			//TODO 支持多工具场景的时候，应该着重检查此场景。如果正好在这里返回了tool_call，应该执行fastFail..
+			fmt.Println("[warning] response truncated with pending tool calls")
 
-		case "tool_calls":
-			// 将 assistant 消息（含 tool_calls）追加到历史记录
 			messages = append(messages, msg.ToParam())
 
-			// 执行每个工具调用
 			for _, tc := range msg.ToolCalls {
-				fmt.Printf("tool call: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+				messages = append(messages, openai.ToolMessage(
 
-				if tc.Function.Name != "execute_bash_command" {
-					messages = append(messages, openai.ToolMessage(
-						fmt.Sprintf("error: unknown tool '%s'", tc.Function.Name),
-						tc.ID,
-					))
-					continue
-				}
+					fmt.Sprintf("Tool call %s was not executed: the response hit the output token limit, so its arguments may be truncated. Re-issue the tool call with complete arguments.", tc.Function.Name), tc.ID))
 
-				var args struct {
-					Command string `json:"command"`
-				}
-				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-					messages = append(messages, openai.ToolMessage(
-						fmt.Sprintf("error: failed to parse arguments: %v", err),
-						tc.ID,
-					))
-					continue
-				}
-
-				output, err := executeBashCommand(args.Command)
-				if err != nil {
-					messages = append(messages, openai.ToolMessage(
-						fmt.Sprintf("error: %v", err),
-						tc.ID,
-					))
-					continue
-				}
-
-				messages = append(messages, openai.ToolMessage(output, tc.ID))
 			}
-
-		default:
-			// content_filter 等意外情况，安全结束
 			return nil
 		}
+
+		if len(msg.ToolCalls) == 0 {
+			// current turn finish normally..
+			return nil
+		}
+
+		//tool call
+		// 将 assistant 消息（含 tool_calls）追加到历史记录
+		messages = append(messages, msg.ToParam())
+
+		// 执行每个工具调用
+		for _, tc := range msg.ToolCalls {
+			fmt.Printf("tool call: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+
+			if tc.Function.Name != "execute_bash_command" {
+				messages = append(messages, openai.ToolMessage(
+					fmt.Sprintf("error: unknown tool '%s'", tc.Function.Name),
+					tc.ID,
+				))
+				continue
+			}
+
+			var args struct {
+				Command string `json:"command"`
+			}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+				messages = append(messages, openai.ToolMessage(
+					fmt.Sprintf("error: failed to parse arguments: %v", err),
+					tc.ID,
+				))
+				continue
+			}
+
+			output, err := executeBashCommand(ctx, args.Command)
+			if err != nil {
+				messages = append(messages, openai.ToolMessage(
+					fmt.Sprintf("error: %v", err),
+					tc.ID,
+				))
+				continue
+			}
+
+			messages = append(messages, openai.ToolMessage(output, tc.ID))
+		}
+
 	}
 
 	return fmt.Errorf("agent loop exceeded max iterations (%d)", maxIterations)
@@ -153,8 +196,8 @@ func bashTool() openai.ChatCompletionToolParam {
 }
 
 // executeBashCommand 执行一条 bash 命令并返回 stdout+stderr 的合并输出。
-func executeBashCommand(command string) (string, error) {
-	out, err := exec.Command("bash", "-c", command).CombinedOutput()
+func executeBashCommand(ctx context.Context, command string) (string, error) {
+	out, err := exec.CommandContext(ctx, "bash", "-c", command).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("command failed: %w\noutput: %s", err, string(out))
 	}
