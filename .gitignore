@@ -1,4 +1,5 @@
 .vscode
 .vscode/*
 zyron
+.env
 LEARNING_PLAN.md
