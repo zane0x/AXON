@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 
 	"github.com/openai/openai-go"
@@ -26,13 +25,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// resolve cwd as the directory of the running binary (i.e. where main.go lives)
-	exe, err := os.Executable()
+	// resolve cwd as the working directory from which the binary was invoked
+	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to resolve executable path: %v\n", err)
+		fmt.Fprintf(os.Stderr, "failed to resolve working directory: %v\n", err)
 		os.Exit(1)
 	}
-	cwd := filepath.Dir(exe)
 
 	// tool init
 	toolContainer := tools.NewToolContainer()
