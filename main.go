@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"strings"
+	"zyron/tools"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -24,6 +24,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	// tool init
+	toolContainer := tools.NewToolContainer()
+
+	bashTool := tools.BashTool{}
+	toolContainer.RegisterTool(&bashTool)
+
+	// init llm client
 	apiKey := os.Getenv("LLM_TOKEN")
 	if apiKey == "" {
 		fmt.Println("can't find LLM_TOKEN env variable,exit")
@@ -40,8 +47,7 @@ func main() {
 		option.WithBaseURL(baseURL),
 	)
 
-	tool := bashTool()
-
+	// run agent loop
 	for {
 		fmt.Print(">")
 		reader := bufio.NewReader(os.Stdin)
@@ -63,7 +69,7 @@ func main() {
 			&client,
 			"claude-sonnet-4-6",
 			prompt,
-			[]openai.ChatCompletionToolParam{tool},
+			toolContainer,
 		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -83,7 +89,7 @@ func agentLoop(
 	client *openai.Client,
 	model string,
 	instructions string,
-	tools []openai.ChatCompletionToolParam,
+	toolContainer *tools.ToolContainer,
 ) error {
 	messages := []openai.ChatCompletionMessageParamUnion{
 		openai.SystemMessage("You are a helpful assistant that can use tools to answer questions. " +
@@ -91,12 +97,18 @@ func agentLoop(
 		openai.UserMessage(instructions),
 	}
 
+	paramList := []openai.ChatCompletionToolParam{}
+
+	for _, tool := range toolContainer.ToolMap {
+		paramList = append(paramList, tools.ToOpenAiToolParam(tool.Definition()))
+	}
+
 	for i := range maxIterations {
 		fmt.Printf("=== iteration %d ===\n", i+1)
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:    shared.ChatModel(model),
 			Messages: messages,
-			Tools:    tools,
+			Tools:    paramList,
 		})
 		if err != nil {
 			return fmt.Errorf("chat completion error: %w", err)
@@ -137,8 +149,9 @@ func agentLoop(
 		// 执行每个工具调用
 		for _, tc := range msg.ToolCalls {
 			fmt.Printf("tool call: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+			targetTool, exist := toolContainer.ToolMap[tc.Function.Name]
 
-			if tc.Function.Name != "execute_bash_command" {
+			if !exist {
 				messages = append(messages, openai.ToolMessage(
 					fmt.Sprintf("error: unknown tool '%s'", tc.Function.Name),
 					tc.ID,
@@ -146,18 +159,17 @@ func agentLoop(
 				continue
 			}
 
-			var args struct {
-				Command string `json:"command"`
-			}
-			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+			rawParam := json.RawMessage{}
+			if err := rawParam.UnmarshalJSON([]byte(tc.Function.Arguments)); err != nil {
 				messages = append(messages, openai.ToolMessage(
-					fmt.Sprintf("error: failed to parse arguments: %v", err),
+					fmt.Sprintf("error: function tool can't unmarshalJSON '%s'", tc.Function.Arguments),
 					tc.ID,
 				))
 				continue
 			}
 
-			output, err := executeBashCommand(ctx, args.Command)
+			output, err := targetTool.Execute(ctx, rawParam)
+
 			if err != nil {
 				messages = append(messages, openai.ToolMessage(
 					fmt.Sprintf("error: %v", err),
@@ -166,40 +178,10 @@ func agentLoop(
 				continue
 			}
 
-			messages = append(messages, openai.ToolMessage(output, tc.ID))
+			messages = append(messages, openai.ToolMessage(output.Content, tc.ID))
 		}
 
 	}
 
 	return fmt.Errorf("agent loop exceeded max iterations (%d)", maxIterations)
-}
-
-// bashTool 返回一个可执行 bash 命令的 function calling 工具定义。
-func bashTool() openai.ChatCompletionToolParam {
-	return openai.ChatCompletionToolParam{
-		Function: shared.FunctionDefinitionParam{
-			Name:        "execute_bash_command",
-			Description: openai.String("Execute a bash command and return the output."),
-			Parameters: shared.FunctionParameters{
-				"type": "object",
-				"properties": map[string]any{
-					"command": map[string]any{
-						"type":        "string",
-						"description": "A bash command to execute",
-					},
-				},
-				"required":             []string{"command"},
-				"additionalProperties": false,
-			},
-		},
-	}
-}
-
-// executeBashCommand 执行一条 bash 命令并返回 stdout+stderr 的合并输出。
-func executeBashCommand(ctx context.Context, command string) (string, error) {
-	out, err := exec.CommandContext(ctx, "bash", "-c", command).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("command failed: %w\noutput: %s", err, string(out))
-	}
-	return string(out), nil
 }
