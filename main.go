@@ -27,9 +27,7 @@ func main() {
 	// tool init
 	toolContainer := tools.NewToolContainer()
 
-	bashTool := tools.BashTool{}
-	toolContainer.RegisterTool(&bashTool)
-
+	toolContainer.RegisterTool(&tools.BashTool{})
 	toolContainer.RegisterTool(&tools.ReadTool{})
 	toolContainer.RegisterTool(&tools.WriteTool{})
 	toolContainer.RegisterTool(&tools.EditTool{})
