@@ -1,4 +1,4 @@
-module zyron
+module axon
 
 go 1.23.0
 

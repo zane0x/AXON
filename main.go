@@ -1,6 +1,8 @@
 package main
 
 import (
+	"axon/engine"
+	"axon/tools"
 	"bufio"
 	"context"
 	"encoding/json"
@@ -9,8 +11,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
-	"zyron/tools"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -23,6 +25,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+
+	// resolve cwd as the directory of the running binary (i.e. where main.go lives)
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to resolve executable path: %v\n", err)
+		os.Exit(1)
+	}
+	cwd := filepath.Dir(exe)
 
 	// tool init
 	toolContainer := tools.NewToolContainer()
@@ -72,6 +82,7 @@ func main() {
 			"claude-sonnet-4-6",
 			prompt,
 			toolContainer,
+			engine.BuildSystemPrompt(*toolContainer, cwd),
 		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
@@ -92,10 +103,10 @@ func agentLoop(
 	model string,
 	instructions string,
 	toolContainer *tools.ToolContainer,
+	systemPrompt string,
 ) error {
 	messages := []openai.ChatCompletionMessageParamUnion{
-		openai.SystemMessage("You are a helpful assistant that can use tools to answer questions. " +
-			"When you need to execute a bash command, use the execute_bash_command tool."),
+		openai.SystemMessage(systemPrompt),
 		openai.UserMessage(instructions),
 	}
 

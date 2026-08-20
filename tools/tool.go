@@ -9,6 +9,8 @@ type ToolDefinition struct {
 	Name       string
 	Desc       string
 	Parameters ParameterSchema
+	Snippet    string
+	Guidelines []string
 }
 
 type ParameterSchema struct {
