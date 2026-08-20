@@ -30,6 +30,10 @@ func main() {
 	bashTool := tools.BashTool{}
 	toolContainer.RegisterTool(&bashTool)
 
+	toolContainer.RegisterTool(&tools.ReadTool{})
+	toolContainer.RegisterTool(&tools.WriteTool{})
+	toolContainer.RegisterTool(&tools.EditTool{})
+
 	// init llm client
 	apiKey := os.Getenv("LLM_TOKEN")
 	if apiKey == "" {
