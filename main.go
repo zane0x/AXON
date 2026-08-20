@@ -108,18 +108,15 @@ func main() {
 
 	if continueMode && session.Len() > 0 {
 		users, assistants, _ := session.MessageCount()
-		fmt.Printf("[session] resumed %s (%d turns)\n", session.SessionID(), users+assistants)
 		preview := session.FirstUserMessage()
 		if len([]rune(preview)) > 60 {
 			preview = string([]rune(preview)[:60]) + "…"
 		}
-		if preview != "" {
-			fmt.Printf("[session] started with: %q\n", preview)
-		}
+		engine.PrintSessionResumed(session.SessionID(), users+assistants, preview)
 	} else {
-		fmt.Printf("[session] new session %s\n", session.SessionID())
+		engine.PrintSessionNew(session.SessionID())
 	}
-	fmt.Printf("[session] file: %s\n\n", session.SessionPath())
+	engine.PrintSessionFile(session.SessionPath())
 
 	// ── REPL ───────────────────────────────────────────────────────────────────
 	reader := bufio.NewReader(os.Stdin)
@@ -146,7 +143,7 @@ func main() {
 		err = engine.AgentLoop(ctx, &client, "claude-sonnet-4-6", prompt, toolContainer, systemPrompt, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				fmt.Print("\ninterrupted")
+				engine.PrintInterrupted()
 				os.Exit(130)
 			}
 			fmt.Fprintf(os.Stderr, "agent error: %v\n", err)

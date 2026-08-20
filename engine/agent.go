@@ -42,7 +42,7 @@ func AgentLoop(
 	messages = append(messages, openai.UserMessage(instructions))
 	if session != nil {
 		if err := session.AddUserEntry(instructions); err != nil {
-			fmt.Printf("[session] warn: failed to persist user entry: %v\n", err)
+			WarnSessionPersist("user entry", err)
 		}
 	}
 
@@ -53,8 +53,7 @@ func AgentLoop(
 	}
 
 	// ── Agent 循环 ─────────────────────────────────────────────────────────────
-	for i := range MaxIterations {
-		fmt.Printf("=== iteration %d ===\n", i+1)
+	for range MaxIterations {
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:    shared.ChatModel(model),
 			Messages: messages,
@@ -68,21 +67,21 @@ func AgentLoop(
 		msg := choice.Message
 
 		if msg.Content != "" {
-			fmt.Printf("assistant: %s\n", msg.Content)
+			PrintAssistant(msg.Content)
 		}
 
 		// ── length 截断处理 ──────────────────────────────────────────────────
 		// 当响应因 token 上限被截断且有未执行的 tool_call 时，
 		// 不能静默完成——把所有 tool_call 标记为失败塞回，让模型重发。
 		if choice.FinishReason == "length" && len(msg.ToolCalls) != 0 {
-			fmt.Println("[warning] response truncated with pending tool calls")
+			WarnResponseTruncated()
 			messages = append(messages, msg.ToParam())
 
 			// 持久化截断的 assistant 消息（内容可能不完整）
 			if session != nil {
 				stcs := toSessionToolCalls(msg.ToolCalls)
 				if err := session.AddAssistantEntry(msg.Content, stcs); err != nil {
-					fmt.Printf("[session] warn: failed to persist truncated assistant entry: %v\n", err)
+					WarnSessionPersist("truncated assistant entry", err)
 				}
 			}
 
@@ -95,7 +94,7 @@ func AgentLoop(
 				messages = append(messages, openai.ToolMessage(errMsg, tc.ID))
 				if session != nil {
 					if err := session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg); err != nil {
-						fmt.Printf("[session] warn: failed to persist truncation tool result: %v\n", err)
+						WarnSessionPersist("truncation tool result", err)
 					}
 				}
 			}
@@ -108,7 +107,7 @@ func AgentLoop(
 			// 持久化最终 assistant 回复
 			if session != nil {
 				if err := session.AddAssistantEntry(msg.Content, nil); err != nil {
-					fmt.Printf("[session] warn: failed to persist final assistant entry: %v\n", err)
+					WarnSessionPersist("final assistant entry", err)
 				}
 			}
 			return nil
@@ -121,12 +120,12 @@ func AgentLoop(
 		if session != nil {
 			stcs := toSessionToolCalls(msg.ToolCalls)
 			if err := session.AddAssistantEntry(msg.Content, stcs); err != nil {
-				fmt.Printf("[session] warn: failed to persist assistant entry: %v\n", err)
+				WarnSessionPersist("assistant entry", err)
 			}
 		}
 
 		for _, tc := range msg.ToolCalls {
-			fmt.Printf("tool call: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+			PrintToolCall(tc.Function.Name, tc.Function.Arguments)
 			targetTool, exist := toolContainer.ToolMap[tc.Function.Name]
 
 			if !exist {
@@ -161,7 +160,7 @@ func AgentLoop(
 			messages = append(messages, openai.ToolMessage(output.Content, tc.ID))
 			if session != nil {
 				if err := session.AddToolResultEntry(tc.ID, tc.Function.Name, output.Content); err != nil {
-					fmt.Printf("[session] warn: failed to persist tool result: %v\n", err)
+					WarnSessionPersist("tool result", err)
 				}
 			}
 		}

@@ -292,7 +292,7 @@ func parseSessionFile(path string) ([]SessionEntry, error) {
 		var entry SessionEntry
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			// 跳过损坏行，不中断加载（与 pi 的容错策略一致）
-			fmt.Fprintf(os.Stderr, "[session] skip malformed line %d: %v\n", lineNum, err)
+			WarnSessionSkipLine(lineNum, err)
 			continue
 		}
 		entries = append(entries, entry)
