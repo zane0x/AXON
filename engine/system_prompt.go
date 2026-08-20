@@ -5,9 +5,17 @@ import (
 	"strings"
 )
 
+// SystemPromptOptions holds all inputs needed to construct the system prompt.
+// Using an options struct makes future additions (CustomPrompt, ContextFiles, …)
+// backward-compatible — callers that already set the fields they care about
+// are unaffected when new optional fields are added.
+type SystemPromptOptions struct {
+	Cwd       string
+	Container *tools.ToolContainer
+}
+
 // BuildSystemPrompt constructs a structured system prompt for the agent.
-// cwd should be the working directory of the main binary (not the package directory).
-func BuildSystemPrompt(container tools.ToolContainer, cwd string) string {
+func BuildSystemPrompt(opts SystemPromptOptions) string {
 	var b strings.Builder
 
 	b.WriteString("You are Claude Code, a helpful AI coding assistant that operates inside a terminal.\n\n")
@@ -15,13 +23,13 @@ func BuildSystemPrompt(container tools.ToolContainer, cwd string) string {
 	// ── Environment ────────────────────────────────────────────────────────────
 	b.WriteString("## Environment\n")
 	b.WriteString("- Current working directory: ")
-	b.WriteString(cwd)
+	b.WriteString(opts.Cwd)
 	b.WriteString("\n\n")
 
 	// ── Available tools ────────────────────────────────────────────────────────
-	if len(container.ToolMap) > 0 {
+	if opts.Container != nil && len(opts.Container.ToolMap) > 0 {
 		b.WriteString("## Available Tools\n")
-		for _, tool := range container.ToolMap {
+		for _, tool := range opts.Container.ToolMap {
 			def := tool.Definition()
 			b.WriteString("### ")
 			b.WriteString(def.Name)
