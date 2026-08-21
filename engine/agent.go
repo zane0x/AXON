@@ -10,7 +10,7 @@ import (
 	"github.com/openai/openai-go/shared"
 )
 
-const MaxIterations = 20
+const MaxIterations = 2000
 
 // AgentLoop runs a Chat Completions-style agent loop.
 // The model may return text, call tools, or both; the loop continues until the
