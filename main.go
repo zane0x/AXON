@@ -143,7 +143,7 @@ func main() {
 			return
 		}
 
-		err = engine.AgentLoop(ctx, &client, "claude-sonnet-4-6", prompt, toolContainer, systemPrompt, session)
+		err = engine.AgentLoop(ctx, &client, "gemini-3-flash-agent", prompt, toolContainer, systemPrompt, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				fmt.Print("\ninterrupted")

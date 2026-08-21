@@ -18,7 +18,7 @@ type SystemPromptOptions struct {
 func BuildSystemPrompt(opts SystemPromptOptions) string {
 	var b strings.Builder
 
-	b.WriteString("You are Claude Code, a helpful AI coding assistant that operates inside a terminal.\n\n")
+	b.WriteString("You are axon, a helpful AI coding assistant that create by zane0x.you operates inside a terminal.\n\n")
 
 	// ── Environment ────────────────────────────────────────────────────────────
 	b.WriteString("## Environment\n")
