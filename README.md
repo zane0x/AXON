@@ -1,6 +1,5 @@
 # AXON 🚀
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/zane0x/AXON)](https://goreportcard.com/report/github.com/zane0x/AXON)
 [![License](https://img.shields.io/github/license/zane0x/AXON)](https://github.com/zane0x/AXON/blob/main/LICENSE)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/zane0x/AXON)](https://github.com/zane0x/AXON)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg?style=flat-square)](https://github.com/zane0x/AXON/pulls)
