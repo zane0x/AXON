@@ -20,8 +20,10 @@ import (
 type EntryType string
 
 const (
-	EntryTypeUser      EntryType = "user"
-	EntryTypeAssistant EntryType = "assistant"
+	CurrentSessionVersion           = 1
+	EntryTypeSession      EntryType = "session"
+	EntryTypeUser         EntryType = "user"
+	EntryTypeAssistant    EntryType = "assistant"
 	// tool_result 附属于某次 assistant 的 tool_call，需要特殊重建逻辑
 	EntryTypeToolResult EntryType = "tool_result"
 	EntryTypeSummary    EntryType = "summary" // 预留给第 5 课上下文压缩
@@ -33,6 +35,8 @@ type SessionEntry struct {
 	Type      EntryType `json:"type"`
 	ID        string    `json:"id"`
 	Timestamp int64     `json:"timestamp"`
+	Version   int       `json:"version,omitempty"`
+	Cwd       string    `json:"cwd,omitempty"`
 	// Content 存储消息的文本内容；对于 assistant tool_call 消息，
 	// 文本部分存这里，tool_calls 存 ToolCalls。
 	Content string `json:"content,omitempty"`
@@ -59,7 +63,9 @@ type SessionManager struct {
 	sessionID string
 	// sessionPath 是 JSONL 文件的完整路径。
 	sessionPath string
-	// sessionList 是内存中已加载的全部条目（含本次新增）。
+	// header 保存 session 文件的第一行元数据。
+	header SessionEntry
+	// sessionList 是内存中已加载的消息条目（不包含 header）。
 	sessionList []SessionEntry
 }
 
@@ -91,10 +97,19 @@ func NewSessionManagerInDir(dir string) (*SessionManager, error) {
 		return nil, fmt.Errorf("cannot create sessions dir: %w", err)
 	}
 	id := NewID()
-	return &SessionManager{
-		sessionID:   id,
-		sessionPath: filepath.Join(dir, id+".jsonl"),
-	}, nil
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, fmt.Errorf("cannot resolve session cwd: %w", err)
+	}
+	header := SessionEntry{
+		Type: EntryTypeSession, Version: CurrentSessionVersion, ID: id,
+		Timestamp: time.Now().Unix(), Cwd: cwd,
+	}
+	s := &SessionManager{sessionID: id, sessionPath: filepath.Join(dir, id+".jsonl"), header: header}
+	if err := s.rewriteFile(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // LoadSessionManager 从指定 JSONL 文件加载已有会话（用于 --continue）。
@@ -103,13 +118,16 @@ func LoadSessionManager(path string) (*SessionManager, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 从文件名提取 ID（去掉目录和 .jsonl 后缀）
-	base := filepath.Base(path)
-	id := strings.TrimSuffix(base, ".jsonl")
+	if len(entries) == 0 || entries[0].Type != EntryTypeSession {
+		return nil, fmt.Errorf("session file %s is missing a valid header", path)
+	}
+	header := entries[0]
+	if header.ID == "" {
+		return nil, fmt.Errorf("session file %s has an empty session ID", path)
+	}
 	return &SessionManager{
-		sessionID:   id,
-		sessionPath: path,
-		sessionList: entries,
+		sessionID: header.ID, sessionPath: path, header: header,
+		sessionList: entries[1:],
 	}, nil
 }
 
@@ -120,6 +138,11 @@ func FindMostRecentSession() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return FindMostRecentSessionInDir(dir)
+}
+
+// FindMostRecentSessionInDir 返回指定目录中修改时间最新的有效 session 文件。
+func FindMostRecentSessionInDir(dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -199,8 +222,11 @@ func (s *SessionManager) addEntry(
 		ToolCallID: toolCallID,
 		ToolName:   toolName,
 	}
+	if err := s.appendEntryToFile(entry); err != nil {
+		return err
+	}
 	s.sessionList = append(s.sessionList, entry)
-	return s.appendEntryToFile(entry)
+	return nil
 }
 
 // appendEntryToFile 将单个条目序列化为 JSON 并追加一行到 JSONL 文件。
@@ -376,6 +402,11 @@ func ListSessions() ([]SessionSummary, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ListSessionsInDir(dir)
+}
+
+// ListSessionsInDir 列出指定目录中的 session 摘要。
+func ListSessionsInDir(dir string) ([]SessionSummary, error) {
 	dirEntries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -396,6 +427,8 @@ func ListSessions() ([]SessionSummary, error) {
 		path := filepath.Join(dir, de.Name())
 		id := strings.TrimSuffix(de.Name(), ".jsonl")
 
+		// 解析 header 后使用文件内 ID，避免文件被重命名后 ID 错误。
+		// 损坏或旧格式文件仍使用文件名作为降级展示 ID。
 		// 轻量加载：解析 JSONL 只为获取第一条 user 消息和条目数
 		entries, err := parseSessionFile(path)
 		if err != nil {
@@ -406,6 +439,9 @@ func ListSessions() ([]SessionSummary, error) {
 				ModTime: info.ModTime(),
 			})
 			continue
+		}
+		if len(entries) > 0 && entries[0].Type == EntryTypeSession && entries[0].ID != "" {
+			id = entries[0].ID
 		}
 
 		firstUser := ""
@@ -421,11 +457,15 @@ func ListSessions() ([]SessionSummary, error) {
 			firstUser = string([]rune(firstUser)[:previewLen]) + "…"
 		}
 
+		messageCount := len(entries)
+		if len(entries) > 0 && entries[0].Type == EntryTypeSession {
+			messageCount--
+		}
 		summaries = append(summaries, SessionSummary{
 			ID:           id,
 			Path:         path,
 			ModTime:      info.ModTime(),
-			EntryCount:   len(entries),
+			EntryCount:   messageCount,
 			FirstUserMsg: firstUser,
 		})
 	}
@@ -455,8 +495,13 @@ func (s *SessionManager) TruncateAfter(keepCount int) error {
 	if keepCount >= len(s.sessionList) {
 		return nil // 无需截断
 	}
-	s.sessionList = s.sessionList[:keepCount]
-	return s.rewriteFile()
+	original := s.sessionList
+	s.sessionList = append([]SessionEntry(nil), original[:keepCount]...)
+	if err := s.rewriteFile(); err != nil {
+		s.sessionList = original
+		return err
+	}
+	return nil
 }
 
 // rewriteFile 将内存中当前的 sessionList 整体重写到 JSONL 文件。
@@ -468,7 +513,8 @@ func (s *SessionManager) rewriteFile() error {
 	}
 	defer f.Close()
 
-	for _, entry := range s.sessionList {
+	allEntries := append([]SessionEntry{s.header}, s.sessionList...)
+	for _, entry := range allEntries {
 		line, err := json.Marshal(entry)
 		if err != nil {
 			return fmt.Errorf("cannot marshal entry %s: %w", entry.ID, err)

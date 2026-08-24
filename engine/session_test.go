@@ -43,19 +43,28 @@ func TestAddUserEntry_WritesToDisk(t *testing.T) {
 		t.Fatalf("AddUserEntry() error = %v", err)
 	}
 	entries := readSessionEntries(t, s.SessionPath())
-	if got, want := len(entries), 1; got != want {
+	if got, want := len(entries), 2; got != want {
 		t.Fatalf("persisted entry count = %d, want %d", got, want)
 	}
-	if got, want := entries[0].Type, EntryTypeUser; got != want {
+	if got, want := entries[0].Type, EntryTypeSession; got != want {
+		t.Errorf("header type = %q, want %q", got, want)
+	}
+	if got, want := entries[0].ID, s.SessionID(); got != want {
+		t.Errorf("header ID = %q, want %q", got, want)
+	}
+	if got, want := entries[0].Version, CurrentSessionVersion; got != want {
+		t.Errorf("header version = %d, want %d", got, want)
+	}
+	if got, want := entries[1].Type, EntryTypeUser; got != want {
 		t.Errorf("persisted type = %q, want %q", got, want)
 	}
-	if got, want := entries[0].Content, "hello, world"; got != want {
+	if got, want := entries[1].Content, "hello, world"; got != want {
 		t.Errorf("persisted content = %q, want %q", got, want)
 	}
-	if entries[0].ID == "" {
+	if entries[1].ID == "" {
 		t.Error("persisted entry ID is empty")
 	}
-	if entries[0].Timestamp == 0 {
+	if entries[1].Timestamp == 0 {
 		t.Error("persisted entry timestamp is zero")
 	}
 }
@@ -104,7 +113,7 @@ func TestSessionManager_RoundTrip(t *testing.T) {
 
 func TestLoadSessionManager_SkipsMalformedLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
-	content := strings.Join([]string{`{"type":"user","id":"u1","timestamp":1,"content":"before"}`, `not valid json`, `{"type":"assistant","id":"a1","timestamp":2,"content":"after"}`, ""}, "\n")
+	content := strings.Join([]string{`{"type":"session","version":1,"id":"session-1","timestamp":1}`, `{"type":"user","id":"u1","timestamp":2,"content":"before"}`, `not valid json`, `{"type":"assistant","id":"a1","timestamp":3,"content":"after"}`, ""}, "\n")
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -114,6 +123,9 @@ func TestLoadSessionManager_SkipsMalformedLines(t *testing.T) {
 	}
 	if got, want := s.Len(), 2; got != want {
 		t.Fatalf("loaded entry count = %d, want %d", got, want)
+	}
+	if got, want := s.SessionID(), "session-1"; got != want {
+		t.Errorf("session ID = %q, want %q", got, want)
 	}
 	if got, want := s.Entries()[0].Content, "before"; got != want {
 		t.Errorf("first content = %q, want %q", got, want)
@@ -131,10 +143,10 @@ func TestSessionManager_AppendDoesNotOverwrite(t *testing.T) {
 		}
 	}
 	entries := readSessionEntries(t, s.SessionPath())
-	if got, want := len(entries), 2; got != want {
+	if got, want := len(entries), 3; got != want {
 		t.Fatalf("persisted entry count = %d, want %d", got, want)
 	}
-	if entries[0].Content != "first" || entries[1].Content != "second" {
+	if entries[1].Content != "first" || entries[2].Content != "second" {
 		t.Errorf("persisted contents = %q, %q", entries[0].Content, entries[1].Content)
 	}
 }
@@ -165,10 +177,10 @@ func TestSessionManager_TruncateAfter(t *testing.T) {
 		t.Fatalf("in-memory entry count = %d, want %d", got, want)
 	}
 	entries := readSessionEntries(t, s.SessionPath())
-	if got, want := len(entries), 2; got != want {
+	if got, want := len(entries), 3; got != want {
 		t.Fatalf("persisted entry count = %d, want %d", got, want)
 	}
-	if entries[1].Content != "two" {
+	if entries[2].Content != "two" {
 		t.Errorf("second persisted content = %q, want %q", entries[1].Content, "two")
 	}
 }
