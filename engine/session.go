@@ -46,8 +46,8 @@ type SessionEntry struct {
 
 // SessionToolCall 对应 openai tool_call 的最小持久化形式。
 type SessionToolCall struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
 	Arguments string `json:"arguments"`
 }
 
@@ -77,6 +77,15 @@ func NewSessionManager() (*SessionManager, error) {
 	dir, err := sessionsDir()
 	if err != nil {
 		return nil, err
+	}
+	return NewSessionManagerInDir(dir)
+}
+
+// NewSessionManagerInDir 在指定目录创建一个全新会话。
+// 除测试外，也可用于调用方显式管理 session 存储位置。
+func NewSessionManagerInDir(dir string) (*SessionManager, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("session directory must not be empty")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create sessions dir: %w", err)

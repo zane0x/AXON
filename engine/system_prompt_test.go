@@ -19,7 +19,7 @@ func newContainerWith(ts ...tools.AgentTool) *tools.ToolContainer {
 
 func TestBuildSystemPrompt_ContainsHeader(t *testing.T) {
 	got := BuildSystemPrompt(SystemPromptOptions{Container: tools.NewToolContainer(), Cwd: "/tmp/test"})
-	if !strings.Contains(got, "You are Claude Code") {
+	if !strings.Contains(got, "You are axon") {
 		t.Errorf("expected header, got:\n%s", got)
 	}
 }

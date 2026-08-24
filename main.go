@@ -33,6 +33,10 @@ func main() {
 		continuePath string // 指定续聊的文件路径（可选）
 		listMode     bool   // 是否只列出会话
 	)
+	modelName := os.Getenv("LLM_MODEL")
+	if modelName == "" {
+		modelName = "gemini-3-flash-agent"
+	}
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
 		case "--continue", "-c":
@@ -41,6 +45,14 @@ func main() {
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 				continuePath = args[i]
+			}
+		case "--model", "-m":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				modelName = args[i]
+			} else {
+				fmt.Fprintln(os.Stderr, "error: --model or -m requires an argument")
+				os.Exit(1)
 			}
 		case "--list", "-l":
 			listMode = true
@@ -143,7 +155,7 @@ func main() {
 			return
 		}
 
-		err = engine.AgentLoop(ctx, &client, "gemini-3-flash-agent", prompt, toolContainer, systemPrompt, session)
+		err = engine.AgentLoop(ctx, &client, modelName, prompt, toolContainer, systemPrompt, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				fmt.Print("\ninterrupted")
@@ -208,10 +220,12 @@ func printUsage() {
 
 Options:
   --continue, -c [path]   resume the most recent session (or a specific JSONL file)
+  --model, -m <model>     specify the model to use (defaults to LLM_MODEL env var or "gemini-3-flash-agent")
   --list, -l              list all saved sessions
   --help, -h              show this help
 
 Environment variables:
   LLM_TOKEN      API key for the LLM provider
-  LLM_END_PROT   Base URL of the LLM API endpoint`)
+  LLM_END_PROT   Base URL of the LLM API endpoint
+  LLM_MODEL      Default model name to use`)
 }
