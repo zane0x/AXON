@@ -85,8 +85,8 @@ func main() {
 	//初始化model
 	model := engine.Model{
 		ID:            modelName,
-		ContextWindow: 5000,
-		MaxTokens:     100,
+		ContextWindow: 128000,
+		MaxTokens:     12800,
 	}
 
 	// ── 工具注册 ───────────────────────────────────────────────────────────────

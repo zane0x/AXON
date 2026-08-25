@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/shared"
@@ -44,8 +45,7 @@ func AgentLoop(
 	}
 
 	// ── Agent 循环 ─────────────────────────────────────────────────────────────
-	for i := range MaxIterations {
-		fmt.Printf("===current iteration:%d,cur token:%d,model:%s,context token window:%d\n", i+1, session.estimateTokenCnt(), model.ID, model.ContextWindow)
+	for range MaxIterations {
 		//TODO pre check extesion point
 		err := checkCompactionAndCompaction(ctx, session, model, client)
 		if err != nil {
@@ -64,10 +64,6 @@ func AgentLoop(
 
 		choice := resp.Choices[0]
 		msg := choice.Message
-
-		if msg.Content != "" {
-			fmt.Printf("assistant: %s\n", msg.Content)
-		}
 
 		// ── length 截断处理 ──────────────────────────────────────────────────
 		// 当响应因 token 上限被截断且有未执行的 tool_call 时，
@@ -103,6 +99,9 @@ func AgentLoop(
 
 		// ── 无工具调用：最终回复，退出循环 ──────────────────────────────────
 		if len(msg.ToolCalls) == 0 {
+			if msg.Content != "" {
+				fmt.Printf("🤖 Done! %s\n", msg.Content)
+			}
 			// 持久化最终 assistant 回复
 			if session != nil {
 				if err := session.AddAssistantEntry(msg.Content, nil); err != nil {
@@ -123,8 +122,13 @@ func AgentLoop(
 			}
 		}
 
+		fmt.Println("🤖 Thinking...")
+		if msg.Content != "" {
+			fmt.Println(msg.Content)
+		}
+
 		for _, tc := range msg.ToolCalls {
-			fmt.Printf("tool call: %s(%s)\n", tc.Function.Name, tc.Function.Arguments)
+			fmt.Printf("🔧 Calling tool [%s] %s\n", tc.Function.Name, tc.Function.Arguments)
 			targetTool, exist := toolContainer.ToolMap[tc.Function.Name]
 
 			if !exist {
@@ -133,6 +137,7 @@ func AgentLoop(
 				if session != nil {
 					_ = session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg)
 				}
+				fmt.Printf("📝 Tool Result: %s\n\n", errMsg)
 				continue
 			}
 
@@ -143,6 +148,7 @@ func AgentLoop(
 				if session != nil {
 					_ = session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg)
 				}
+				fmt.Printf("📝 Tool Result: %s\n\n", errMsg)
 				continue
 			}
 
@@ -153,6 +159,7 @@ func AgentLoop(
 				if session != nil {
 					_ = session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg)
 				}
+				fmt.Printf("📝 Tool Result: %s\n\n", errMsg)
 				continue
 			}
 
@@ -162,6 +169,9 @@ func AgentLoop(
 					fmt.Printf("[session] warn: failed to persist tool result: %v\n", err)
 				}
 			}
+
+			displayResult := formatToolResultForCLI(tc.Function.Name, output.Content)
+			fmt.Printf("📝 Tool Result: %s\n\n", displayResult)
 		}
 	}
 
@@ -233,11 +243,15 @@ func doCompactionInner(ctx context.Context, session *SessionManager, model Model
 	if err != nil {
 		return fmt.Errorf("summary completion error: %w", err)
 	}
-	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
-		return fmt.Errorf("summary completion returned empty content")
+	if len(resp.Choices) == 0 {
+		return fmt.Errorf("summary completion returned no choices")
+	}
+	choice := resp.Choices[0]
+	if choice.Message.Content == "" {
+		return fmt.Errorf("summary completion returned empty content: finish_reason=%q refusal=%q tool_calls=%d raw=%s", choice.FinishReason, choice.Message.Refusal, len(choice.Message.ToolCalls), choice.RawJSON())
 	}
 
-	return session.AddSummaryEntryWithBoundary(resp.Choices[0].Message.Content, firstKeptEntryID)
+	return session.AddSummaryEntryWithBoundary(choice.Message.Content, firstKeptEntryID)
 }
 
 func checkCompactionAndCompaction(ctx context.Context, session *SessionManager, model Model, client *openai.Client) error {
@@ -251,4 +265,11 @@ func checkCompactionAndCompaction(ctx context.Context, session *SessionManager, 
 		}
 	}
 	return nil
+}
+
+func formatToolResultForCLI(toolName string, outputContent string) string {
+	if toolName == "read" {
+		return fmt.Sprintf("(Read %d bytes)", len(outputContent))
+	}
+	return strings.TrimSpace(outputContent)
 }
