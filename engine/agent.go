@@ -45,20 +45,29 @@ func AgentLoop(
 	}
 
 	// ── Agent 循环 ─────────────────────────────────────────────────────────────
+	spinner := NewSpinner("Thinking...")
+	defer spinner.Stop()
+
 	for range MaxIterations {
 		//TODO pre check extesion point
+		spinner.SetMessage("Checking context window...")
+		spinner.Start()
 		err := checkCompactionAndCompaction(ctx, session, model, client)
+		spinner.Stop()
 		if err != nil {
 			return err
 		}
 		// compaction 可能改变了当前 context，必须丢弃旧 messages 并重建。
 		messages = buildAgentMessages(systemPrompt, session)
 
+		spinner.SetMessage("Thinking...")
+		spinner.Start()
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:    shared.ChatModel(model.ID),
 			Messages: messages,
 			Tools:    paramList,
 		})
+		spinner.Stop()
 		if err != nil {
 			return fmt.Errorf("chat completion error: %w", err)
 		}
@@ -148,7 +157,10 @@ func AgentLoop(
 				continue
 			}
 
+			spinner.SetMessage(fmt.Sprintf("Executing tool [%s]...", tc.Function.Name))
+			spinner.Start()
 			output, err := targetTool.Execute(ctx, rawParam)
+			spinner.Stop()
 			if err != nil {
 				errMsg := fmt.Sprintf("error: %v", err)
 				messages = append(messages, openai.ToolMessage(errMsg, tc.ID))

@@ -10,9 +10,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/chzyer/readline"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 )
@@ -138,25 +140,116 @@ func main() {
 	engine.PrintSessionFile(session.SessionPath())
 
 	// ── REPL ───────────────────────────────────────────────────────────────────
-	reader := bufio.NewReader(os.Stdin)
+	homeDir, err := os.UserHomeDir()
+	var historyFile string
+	if err == nil {
+		historyDir := filepath.Join(homeDir, ".axon")
+		_ = os.MkdirAll(historyDir, 0755)
+		historyFile = filepath.Join(historyDir, "history")
+	}
+
+	completer := readline.NewPrefixCompleter(
+		readline.PcItem("/exit"),
+		readline.PcItem("/quit"),
+		readline.PcItem("/clear"),
+		readline.PcItem("/help"),
+	)
+
+	l, err := readline.NewEx(&readline.Config{
+		Prompt:          "\x1b[1;35m> \x1b[0m", // Bold Pink prompt
+		HistoryFile:     historyFile,
+		AutoComplete:    completer,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to initialize readline: %v\n", err)
+		os.Exit(1)
+	}
+	defer l.Close()
+
+	fmt.Println("\x1b[1;32mInteractive CLI Mode.\x1b[0m Type \x1b[1;36m/help\x1b[0m for assistance.")
+
 	for {
-		fmt.Print("> ")
-		text, err := reader.ReadString('\n')
-		if err == io.EOF {
+		line, err := l.Readline()
+		if err == readline.ErrInterrupt {
+			// Ctrl-C: cancel/clear the current line
+			continue
+		} else if err == io.EOF {
+			fmt.Println("Bye~Bye~")
 			return
 		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "read error: %v\n", err)
-			os.Exit(1)
-		}
 
-		prompt := strings.TrimSpace(text)
+		prompt := strings.TrimSpace(line)
 		if prompt == "" {
 			continue
 		}
-		if prompt == "exit" || prompt == "quit" {
+
+		// Built-in Commands
+		if prompt == "/exit" || prompt == "/quit" || prompt == "exit" || prompt == "quit" {
 			fmt.Println("Bye~Bye~")
 			return
+		}
+		if prompt == "/clear" {
+			fmt.Print("\x1b[H\x1b[2J") // Clear screen
+			continue
+		}
+		if prompt == "/help" {
+			printInteractiveHelp()
+			continue
+		}
+
+		// Multi-line Input Handling (triple-quotes block)
+		if strings.HasPrefix(prompt, `"""`) {
+			var builder strings.Builder
+			initial := strings.TrimPrefix(prompt, `"""`)
+			if initial != "" {
+				builder.WriteString(initial)
+				builder.WriteByte('\n')
+			}
+			l.SetPrompt("\x1b[2;90m... \x1b[0m") // Dim gray continuation prompt
+			for {
+				subLine, subErr := l.Readline()
+				if subErr != nil {
+					break
+				}
+				subTrimmed := strings.TrimSpace(subLine)
+				if subTrimmed == `"""` {
+					break
+				}
+				builder.WriteString(subLine)
+				builder.WriteByte('\n')
+			}
+			l.SetPrompt("\x1b[1;35m> \x1b[0m") // Restore original prompt
+			prompt = strings.TrimSpace(builder.String())
+			if prompt == "" {
+				continue
+			}
+		} else if strings.HasSuffix(prompt, "\\") {
+			// Multi-line Input Handling (backslash continuation)
+			var builder strings.Builder
+			builder.WriteString(strings.TrimSuffix(prompt, "\\"))
+			builder.WriteByte('\n')
+			l.SetPrompt("\x1b[2;90m... \x1b[0m") // Dim gray continuation prompt
+			for {
+				subLine, subErr := l.Readline()
+				if subErr != nil {
+					break
+				}
+				trimmed := strings.TrimSpace(subLine)
+				if strings.HasSuffix(trimmed, "\\") {
+					builder.WriteString(strings.TrimSuffix(subLine, "\\"))
+					builder.WriteByte('\n')
+				} else {
+					builder.WriteString(subLine)
+					break
+				}
+			}
+			l.SetPrompt("\x1b[1;35m> \x1b[0m") // Restore original prompt
+			prompt = strings.TrimSpace(builder.String())
+			if prompt == "" {
+				continue
+			}
 		}
 
 		err = engine.AgentLoop(ctx, &client, model, prompt, toolContainer, systemPrompt, session)
@@ -165,7 +258,7 @@ func main() {
 				engine.PrintInterrupted()
 				os.Exit(130)
 			}
-			fmt.Fprintf(os.Stderr, "agent error: %v\n", err)
+			fmt.Fprintf(os.Stderr, "\x1b[1;31magent error: %v\x1b[0m\n", err)
 			os.Exit(1)
 		}
 	}
@@ -182,16 +275,84 @@ func initSession(continueMode bool, continuePath string) (*engine.SessionManager
 		return engine.LoadSessionManager(continuePath)
 	}
 
-	// --continue 但未指定路径：自动找最近的 session
-	recent, err := engine.FindMostRecentSession()
+	// --continue 但未指定路径：寻找最近的 sessions
+	summaries, err := engine.ListSessions()
 	if err != nil {
-		return nil, fmt.Errorf("cannot find recent session: %w", err)
+		return nil, fmt.Errorf("cannot list sessions: %w", err)
 	}
-	if recent == "" {
+
+	if len(summaries) == 0 {
 		fmt.Println("[session] no existing session found, starting new session")
 		return engine.NewSessionManager()
 	}
-	return engine.LoadSessionManager(recent)
+
+	// 如果只有 1 个 session，自动加载它
+	if len(summaries) == 1 {
+		fmt.Printf("[session] automatically resuming the only session: %s\n", summaries[0].ID)
+		return engine.LoadSessionManager(summaries[0].Path)
+	}
+
+	// 如果有多个 session，显示交互式菜单让用户选择，限制最大展示数量（例如 7 个）
+	maxShow := 7
+	if len(summaries) < maxShow {
+		maxShow = len(summaries)
+	}
+
+	fmt.Println("\x1b[1;36mSelect a session to resume:\x1b[0m")
+	for i := 0; i < maxShow; i++ {
+		s := summaries[i]
+		modStr := s.ModTime.Format("2006-01-02 15:04")
+		preview := s.FirstUserMsg
+		if preview == "" {
+			preview = "(empty)"
+		}
+		// 列出选项
+		fmt.Printf("  \x1b[1;33m[%d]\x1b[0m \x1b[90m%s\x1b[0m (%d msgs) %s\n", i+1, modStr, s.EntryCount, preview)
+	}
+	fmt.Printf("  \x1b[1;33m[%d]\x1b[0m Start a brand new session\n", maxShow+1)
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("Enter selection [1-%d, default 1]: ", maxShow+1)
+		text, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read error: %w", err)
+		}
+		text = strings.TrimSpace(text)
+		if text == "" {
+			// 默认选 1 (最近的会话)
+			return engine.LoadSessionManager(summaries[0].Path)
+		}
+
+		var choice int
+		_, scanErr := fmt.Sscanf(text, "%d", &choice)
+		if scanErr != nil || choice < 1 || choice > maxShow+1 {
+			fmt.Printf("Invalid selection. Please enter a number between 1 and %d.\n", maxShow+1)
+			continue
+		}
+
+		if choice == maxShow+1 {
+			fmt.Println("[session] starting new session")
+			return engine.NewSessionManager()
+		}
+
+		selected := summaries[choice-1]
+		return engine.LoadSessionManager(selected.Path)
+	}
+}
+
+func printInteractiveHelp() {
+	fmt.Print(`
+Interactive CLI Commands:
+  /exit, /quit      Exit the program
+  /clear            Clear screen
+  /help             Show this help information
+
+Multi-line input features:
+  - Start input with """ to begin a multi-line block, and type """ on its own line to submit.
+  - Or end any line with a backslash \ to continue typing on the next line.
+
+`)
 }
 
 // runListMode 列出所有会话摘要并打印到 stdout。
