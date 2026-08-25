@@ -34,7 +34,7 @@ func AgentLoop(
 
 	// 先持久化当前 user，再从 session 统一构造请求上下文。
 	if err := session.AddUserEntry(instructions); err != nil {
-		return fmt.Errorf("persist user entry: %w", err)
+		WarnSessionPersist("user entry", err)
 	}
 	messages := buildAgentMessages(systemPrompt, session)
 
@@ -53,6 +53,7 @@ func AgentLoop(
 		}
 		// compaction 可能改变了当前 context，必须丢弃旧 messages 并重建。
 		messages = buildAgentMessages(systemPrompt, session)
+
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
 			Model:    shared.ChatModel(model.ID),
 			Messages: messages,
@@ -69,14 +70,14 @@ func AgentLoop(
 		// 当响应因 token 上限被截断且有未执行的 tool_call 时，
 		// 不能静默完成——把所有 tool_call 标记为失败塞回，让模型重发。
 		if choice.FinishReason == "length" && len(msg.ToolCalls) != 0 {
-			fmt.Println("[warning] response truncated with pending tool calls")
+			WarnResponseTruncated()
 			messages = append(messages, msg.ToParam())
 
 			// 持久化截断的 assistant 消息（内容可能不完整）
 			if session != nil {
 				stcs := toSessionToolCalls(msg.ToolCalls)
 				if err := session.AddAssistantEntry(msg.Content, stcs); err != nil {
-					fmt.Printf("[session] warn: failed to persist truncated assistant entry: %v\n", err)
+					WarnSessionPersist("truncated assistant entry", err)
 				}
 			}
 
@@ -89,7 +90,7 @@ func AgentLoop(
 				messages = append(messages, openai.ToolMessage(errMsg, tc.ID))
 				if session != nil {
 					if err := session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg); err != nil {
-						fmt.Printf("[session] warn: failed to persist truncation tool result: %v\n", err)
+						WarnSessionPersist("truncation tool result", err)
 					}
 				}
 			}
@@ -99,13 +100,11 @@ func AgentLoop(
 
 		// ── 无工具调用：最终回复，退出循环 ──────────────────────────────────
 		if len(msg.ToolCalls) == 0 {
-			if msg.Content != "" {
-				fmt.Printf("🤖 Done! %s\n", msg.Content)
-			}
+			PrintAssistant(msg.Content)
 			// 持久化最终 assistant 回复
 			if session != nil {
 				if err := session.AddAssistantEntry(msg.Content, nil); err != nil {
-					fmt.Printf("[session] warn: failed to persist final assistant entry: %v\n", err)
+					WarnSessionPersist("final assistant entry", err)
 				}
 			}
 			return nil
@@ -118,17 +117,14 @@ func AgentLoop(
 		if session != nil {
 			stcs := toSessionToolCalls(msg.ToolCalls)
 			if err := session.AddAssistantEntry(msg.Content, stcs); err != nil {
-				fmt.Printf("[session] warn: failed to persist assistant entry: %v\n", err)
+				WarnSessionPersist("assistant entry", err)
 			}
 		}
 
-		fmt.Println("🤖 Thinking...")
-		if msg.Content != "" {
-			fmt.Println(msg.Content)
-		}
+		PrintThinking(msg.Content)
 
 		for _, tc := range msg.ToolCalls {
-			fmt.Printf("🔧 Calling tool [%s] %s\n", tc.Function.Name, tc.Function.Arguments)
+			PrintToolCall(tc.Function.Name, tc.Function.Arguments)
 			targetTool, exist := toolContainer.ToolMap[tc.Function.Name]
 
 			if !exist {
@@ -137,7 +133,7 @@ func AgentLoop(
 				if session != nil {
 					_ = session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg)
 				}
-				fmt.Printf("📝 Tool Result: %s\n\n", errMsg)
+				PrintToolResult(errMsg)
 				continue
 			}
 
@@ -148,7 +144,7 @@ func AgentLoop(
 				if session != nil {
 					_ = session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg)
 				}
-				fmt.Printf("📝 Tool Result: %s\n\n", errMsg)
+				PrintToolResult(errMsg)
 				continue
 			}
 
@@ -159,19 +155,19 @@ func AgentLoop(
 				if session != nil {
 					_ = session.AddToolResultEntry(tc.ID, tc.Function.Name, errMsg)
 				}
-				fmt.Printf("📝 Tool Result: %s\n\n", errMsg)
+				PrintToolResult(errMsg)
 				continue
 			}
 
 			messages = append(messages, openai.ToolMessage(output.Content, tc.ID))
 			if session != nil {
 				if err := session.AddToolResultEntry(tc.ID, tc.Function.Name, output.Content); err != nil {
-					fmt.Printf("[session] warn: failed to persist tool result: %v\n", err)
+					WarnSessionPersist("tool result", err)
 				}
 			}
 
 			displayResult := formatToolResultForCLI(tc.Function.Name, output.Content)
-			fmt.Printf("📝 Tool Result: %s\n\n", displayResult)
+			PrintToolResult(displayResult)
 		}
 	}
 
