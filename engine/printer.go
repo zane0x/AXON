@@ -3,14 +3,45 @@ package engine
 import (
 	"fmt"
 	"os"
+	"sync"
+
+	"github.com/charmbracelet/glamour"
 )
 
 // ── UI 输出（给用户看，写到 stdout）──────────────────────────────────────────
 
+var (
+	markdownRenderer *glamour.TermRenderer
+	rendererOnce     sync.Once
+)
+
+func renderMarkdown(content string) string {
+	rendererOnce.Do(func() {
+		// WithAutoStyle 自动适应终端颜色主题
+		r, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(120),
+		)
+		if err == nil {
+			markdownRenderer = r
+		}
+	})
+
+	if markdownRenderer == nil {
+		return content
+	}
+	out, err := markdownRenderer.Render(content)
+	if err != nil {
+		return content
+	}
+	return out
+}
+
 // PrintAssistant 打印 assistant 的最终回复。
 func PrintAssistant(content string) {
 	if content != "" {
-		fmt.Printf("\x1b[1;34m🤖 Assistant:\x1b[0m %s\n\n", content)
+		rendered := renderMarkdown(content)
+		fmt.Printf("\x1b[1;34m🤖 Assistant:\x1b[0m\n%s\n", rendered)
 	}
 }
 
