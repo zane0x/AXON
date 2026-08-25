@@ -15,13 +15,10 @@ const MaxIterations = 2000
 // AgentLoop runs a Chat Completions-style agent loop.
 // The model may return text, call tools, or both; the loop continues until the
 // model produces a final reply or MaxIterations is reached.
-//
-// session 参数可为 nil——为 nil 时退化为无持久化的无状态模式（兼容旧调用方）。
-// 非 nil 时，每轮对话（user / assistant / tool_result）都会追加到 JSONL 文件。
 func AgentLoop(
 	ctx context.Context,
 	client *openai.Client,
-	model string,
+	model Model,
 	instructions string,
 	toolContainer *tools.ToolContainer,
 	systemPrompt string,
@@ -30,21 +27,15 @@ func AgentLoop(
 	// ── 构造初始消息列表 ───────────────────────────────────────────────────────
 	// 若有已有 session，先用历史消息作为基础，再追加 system + 本轮 user 消息。
 	// system prompt 始终放在最前面，确保模型上下文优先级正确。
-	var messages []openai.ChatCompletionMessageParamUnion
-	messages = append(messages, openai.SystemMessage(systemPrompt))
-
-	if session != nil {
-		// 续聊：将历史对话插入到 system 之后、本轮 user 之前
-		messages = append(messages, session.BuildMessages()...)
+	if session == nil {
+		return fmt.Errorf("param error,session param can't be nil")
 	}
 
-	// 记录并追加本轮用户消息
-	messages = append(messages, openai.UserMessage(instructions))
-	if session != nil {
-		if err := session.AddUserEntry(instructions); err != nil {
-			fmt.Printf("[session] warn: failed to persist user entry: %v\n", err)
-		}
+	// 先持久化当前 user，再从 session 统一构造请求上下文。
+	if err := session.AddUserEntry(instructions); err != nil {
+		return fmt.Errorf("persist user entry: %w", err)
 	}
+	messages := buildAgentMessages(systemPrompt, session)
 
 	// ── 构造工具参数列表 ───────────────────────────────────────────────────────
 	paramList := []openai.ChatCompletionToolParam{}
@@ -54,9 +45,16 @@ func AgentLoop(
 
 	// ── Agent 循环 ─────────────────────────────────────────────────────────────
 	for i := range MaxIterations {
-		fmt.Printf("=== iteration %d ===\n", i+1)
+		fmt.Printf("===current iteration:%d,cur token:%d,model:%s,context token window:%d\n", i+1, session.estimateTokenCnt(), model.ID, model.ContextWindow)
+		//TODO pre check extesion point
+		err := checkCompactionAndCompaction(ctx, session, model, client)
+		if err != nil {
+			return err
+		}
+		// compaction 可能改变了当前 context，必须丢弃旧 messages 并重建。
+		messages = buildAgentMessages(systemPrompt, session)
 		resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
-			Model:    shared.ChatModel(model),
+			Model:    shared.ChatModel(model.ID),
 			Messages: messages,
 			Tools:    paramList,
 		})
@@ -181,4 +179,76 @@ func toSessionToolCalls(tcs []openai.ChatCompletionMessageToolCall) []SessionToo
 		})
 	}
 	return out
+}
+
+func buildAgentMessages(systemPrompt string, session *SessionManager) []openai.ChatCompletionMessageParamUnion {
+	messages := []openai.ChatCompletionMessageParamUnion{openai.SystemMessage(systemPrompt)}
+	return append(messages, session.BuildMessages()...)
+}
+
+func doCompactionInner(ctx context.Context, session *SessionManager, model Model, client *openai.Client) error {
+	// 只对最新 compaction 之后的消息做下一轮摘要；旧 summary 已经代表更早历史。
+	latestSummary := -1
+	for i := session.Len() - 1; i >= 0; i-- {
+		if session.sessionList[i].Type == EntryTypeSummary {
+			latestSummary = i
+			break
+		}
+	}
+	start := latestSummary + 1
+	candidates := session.sessionList[start:]
+	if len(candidates) < 2 {
+		return fmt.Errorf("cannot compact: current input itself is too large")
+	}
+
+	// 至少保留最后一条 entry（通常是当前 user 或 tool result），避免摘要吞掉当前 turn。
+	summarizeCount := 0
+	summarizeTokens := 0
+	budget := model.ContextWindow / 2
+	if budget <= 0 {
+		return fmt.Errorf("cannot compact: invalid context window %d", model.ContextWindow)
+	}
+	for summarizeCount < len(candidates)-1 {
+		next := EstimateEntryTokens(candidates[summarizeCount])
+		if summarizeCount > 0 && summarizeTokens+next > budget {
+			break
+		}
+		summarizeTokens += next
+		summarizeCount++
+	}
+	if summarizeCount == 0 {
+		return fmt.Errorf("cannot compact: current input itself is too large")
+	}
+
+	toSummarize := candidates[:summarizeCount]
+	firstKeptEntryID := candidates[summarizeCount].ID
+	summaryPrompt := "请仔细阅读下面的会话历史并生成摘要。保留用户目标、背景、关键事实、已经完成的工作、工具操作结果、重要文件和未完成任务；删除重复和不必要的细节。"
+	summaryMessages := []openai.ChatCompletionMessageParamUnion{openai.SystemMessage(summaryPrompt)}
+	summaryMessages = append(summaryMessages, buildMessagesFromEntries(toSummarize)...)
+
+	resp, err := client.Chat.Completions.New(ctx, openai.ChatCompletionNewParams{
+		Model:    shared.ChatModel(model.ID),
+		Messages: summaryMessages,
+	})
+	if err != nil {
+		return fmt.Errorf("summary completion error: %w", err)
+	}
+	if len(resp.Choices) == 0 || resp.Choices[0].Message.Content == "" {
+		return fmt.Errorf("summary completion returned empty content")
+	}
+
+	return session.AddSummaryEntryWithBoundary(resp.Choices[0].Message.Content, firstKeptEntryID)
+}
+
+func checkCompactionAndCompaction(ctx context.Context, session *SessionManager, model Model, client *openai.Client) error {
+	for session.estimateTokenCnt() >= model.ContextWindow {
+		before := session.estimateTokenCnt()
+		if err := doCompactionInner(ctx, session, model, client); err != nil {
+			return err
+		}
+		if session.estimateTokenCnt() >= before {
+			return fmt.Errorf("compaction did not reduce context: before=%d after=%d", before, session.estimateTokenCnt())
+		}
+	}
+	return nil
 }

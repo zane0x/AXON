@@ -82,6 +82,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	//初始化model
+	model := engine.Model{
+		ID:            modelName,
+		ContextWindow: 5000,
+		MaxTokens:     100,
+	}
+
 	// ── 工具注册 ───────────────────────────────────────────────────────────────
 	toolContainer := tools.NewToolContainer()
 	toolContainer.RegisterTool(&tools.BashTool{})
@@ -155,7 +162,7 @@ func main() {
 			return
 		}
 
-		err = engine.AgentLoop(ctx, &client, modelName, prompt, toolContainer, systemPrompt, session)
+		err = engine.AgentLoop(ctx, &client, model, prompt, toolContainer, systemPrompt, session)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				fmt.Print("\ninterrupted")

@@ -46,6 +46,8 @@ type SessionEntry struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// ToolName 仅 tool_result 类型使用，便于日志展示。
 	ToolName string `json:"tool_name,omitempty"`
+	// FirstKeptEntryID 仅 summary 类型使用，表示摘要后第一个仍保留的 entry。
+	FirstKeptEntryID string `json:"first_kept_entry_id,omitempty"`
 }
 
 // SessionToolCall 对应 openai tool_call 的最小持久化形式。
@@ -125,6 +127,7 @@ func LoadSessionManager(path string) (*SessionManager, error) {
 	if header.ID == "" {
 		return nil, fmt.Errorf("session file %s has an empty session ID", path)
 	}
+
 	return &SessionManager{
 		sessionID: header.ID, sessionPath: path, header: header,
 		sessionList: entries[1:],
@@ -229,6 +232,44 @@ func (s *SessionManager) addEntry(
 	return nil
 }
 
+// insertEntry 把entry插入到指定位置。保留用于一般历史编辑，不用于 compaction。
+func (s *SessionManager) insertEntry(
+	entryType EntryType,
+	content string,
+	toolCallID string,
+	toolName string,
+	toolCalls []SessionToolCall,
+	pos int,
+) error {
+	entry := SessionEntry{
+		Type:       entryType,
+		ID:         NewID(),
+		Timestamp:  time.Now().Unix(),
+		Content:    content,
+		ToolCalls:  toolCalls,
+		ToolCallID: toolCallID,
+		ToolName:   toolName,
+	}
+	if pos < 0 || pos > s.Len() {
+		return fmt.Errorf("pos:%d illgeal", pos)
+	}
+
+	newSessionList := make([]SessionEntry, len(s.sessionList)+1)
+
+	// pos 前面的元素
+	copy(newSessionList[:pos], s.sessionList[:pos])
+
+	// 插入新 entry
+	newSessionList[pos] = entry
+
+	// pos 后面的元素整体后移一位
+	copy(newSessionList[pos+1:], s.sessionList[pos:])
+
+	s.sessionList = newSessionList
+
+	return s.rewriteFile()
+}
+
 // appendEntryToFile 将单个条目序列化为 JSON 并追加一行到 JSONL 文件。
 // 以 O_APPEND 打开，保证并发安全（单进程场景下足够）。
 func (s *SessionManager) appendEntryToFile(entry SessionEntry) error {
@@ -253,26 +294,51 @@ func (s *SessionManager) appendEntryToFile(entry SessionEntry) error {
 //   - tool_result → openai.ToolMessage
 //   - summary   → openai.SystemMessage（压缩摘要，第 5 课启用）
 func (s *SessionManager) BuildMessages() []openai.ChatCompletionMessageParamUnion {
+	latestSummary := -1
+	for i := len(s.sessionList) - 1; i >= 0; i-- {
+		if s.sessionList[i].Type == EntryTypeSummary {
+			latestSummary = i
+			break
+		}
+	}
+
 	var msgs []openai.ChatCompletionMessageParamUnion
-	for _, e := range s.sessionList {
+	if latestSummary < 0 {
+		return buildMessagesFromEntries(s.sessionList)
+	}
+
+	// Summary 是当前 context 的替代物；summary 之前的旧 entries 仍保留在日志中。
+	msgs = append(msgs, openai.SystemMessage(s.sessionList[latestSummary].Content))
+	keepFrom := latestSummary
+	if id := s.sessionList[latestSummary].FirstKeptEntryID; id != "" {
+		for i := 0; i < latestSummary; i++ {
+			if s.sessionList[i].ID == id {
+				keepFrom = i
+				break
+			}
+		}
+	}
+	msgs = append(msgs, buildMessagesFromEntries(s.sessionList[keepFrom:latestSummary])...)
+	msgs = append(msgs, buildMessagesFromEntries(s.sessionList[latestSummary+1:])...)
+	return msgs
+}
+
+func buildMessagesFromEntries(entries []SessionEntry) []openai.ChatCompletionMessageParamUnion {
+	var msgs []openai.ChatCompletionMessageParamUnion
+	for _, e := range entries {
 		switch e.Type {
 		case EntryTypeUser:
 			msgs = append(msgs, openai.UserMessage(e.Content))
-
 		case EntryTypeAssistant:
 			if len(e.ToolCalls) == 0 {
 				msgs = append(msgs, openai.AssistantMessage(e.Content))
 			} else {
-				// 有 tool_call 时需要构造带 tool_calls 字段的 assistant 消息
 				msgs = append(msgs, buildAssistantMessageWithToolCalls(e))
 			}
-
 		case EntryTypeToolResult:
 			msgs = append(msgs, openai.ToolMessage(e.Content, e.ToolCallID))
-
 		case EntryTypeSummary:
-			// 压缩摘要作为新的 system 消息插入，替代被压缩掉的旧历史
-			msgs = append(msgs, openai.SystemMessage(e.Content))
+			// 历史中的旧 summary 不是当前 context 的起点，跳过。
 		}
 	}
 	return msgs
@@ -485,6 +551,29 @@ func (s *SessionManager) AddSummaryEntry(content string) error {
 	return s.addEntry(EntryTypeSummary, content, "", "", nil)
 }
 
+// AddSummaryEntryWithBoundary 追加一条压缩摘要，同时记录当前 context 的保留边界。
+// 被摘要的历史 entry 不会删除，BuildMessages 只在当前 context 中用 summary 替代它们。
+func (s *SessionManager) AddSummaryEntryWithBoundary(content, firstKeptEntryID string) error {
+	entry := SessionEntry{
+		Type:             EntryTypeSummary,
+		ID:               NewID(),
+		Timestamp:        time.Now().Unix(),
+		Content:          content,
+		FirstKeptEntryID: firstKeptEntryID,
+	}
+	if err := s.appendEntryToFile(entry); err != nil {
+		return err
+	}
+	s.sessionList = append(s.sessionList, entry)
+	return nil
+}
+
+// InsertSummaryEntry is kept for compatibility with older callers.
+// New compaction code should use AddSummaryEntryWithBoundary.
+func (s *SessionManager) InsertSummaryEntry(content string, pos int) error {
+	return s.insertEntry(EntryTypeSummary, content, "", "", nil, pos)
+}
+
 // TruncateAfter 将内存中的 sessionList 截断到指定条目数，并重写整个 JSONL 文件。
 // 用于上下文压缩后去掉被摘要替代的旧条目。
 // 注意：这是破坏性操作，调用前应确认截断点正确。
@@ -533,4 +622,65 @@ func NewID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// -- session compaction --
+
+func (s *SessionManager) estimateTokenCnt() int {
+	entries := s.contextEntries()
+	total := 0
+	for _, entry := range entries {
+		total += EstimateEntryTokens(entry)
+	}
+	return total
+}
+
+// contextEntries 返回当前会实际发送给模型的 session entries，不包含 system prompt。
+func (s *SessionManager) contextEntries() []SessionEntry {
+	latestSummary := -1
+	for i := len(s.sessionList) - 1; i >= 0; i-- {
+		if s.sessionList[i].Type == EntryTypeSummary {
+			latestSummary = i
+			break
+		}
+	}
+	if latestSummary < 0 {
+		return append([]SessionEntry(nil), s.sessionList...)
+	}
+
+	result := []SessionEntry{s.sessionList[latestSummary]}
+	keepFrom := latestSummary
+	if id := s.sessionList[latestSummary].FirstKeptEntryID; id != "" {
+		for i := 0; i < latestSummary; i++ {
+			if s.sessionList[i].ID == id {
+				keepFrom = i
+				break
+			}
+		}
+	}
+	result = append(result, s.sessionList[keepFrom:latestSummary]...)
+	result = append(result, s.sessionList[latestSummary+1:]...)
+	return result
+}
+
+// EstimateEntryTokens 使用 chars/4 的保守近似；它是 context 估算，不是真实 tokenizer。
+func EstimateEntryTokens(entry SessionEntry) int {
+	chars := 0
+	switch entry.Type {
+	case EntryTypeAssistant, EntryTypeSummary, EntryTypeUser:
+		chars += len(entry.Content)
+		if entry.Type == EntryTypeAssistant {
+			for _, call := range entry.ToolCalls {
+				chars += len(call.Name) + len(call.Arguments)
+			}
+		}
+	case EntryTypeToolResult:
+		chars += len(entry.ToolName) + len(entry.Content)
+	case EntryTypeSession:
+		return 0
+	}
+	if chars == 0 {
+		return 0
+	}
+	return (chars + 3) / 4
 }
